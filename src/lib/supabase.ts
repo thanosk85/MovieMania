@@ -6,12 +6,15 @@ import { createClient } from '@supabase/supabase-js';
 const url = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
 const anonKey = process.env.EXPO_PUBLIC_SUPABASE_KEY ?? '';
 
+// Στο web server rendering (Node) δεν υπάρχει window/localStorage, οπότε δεν αποθηκεύεται session.
+const isServer = process.env.EXPO_OS === 'web' && typeof window === 'undefined';
+
 export const supabaseConfigured = Boolean(url && anonKey);
 export const supabase = createClient(url || 'http://localhost', anonKey || 'missing', {
   auth: {
-    storage: AsyncStorage,
-    autoRefreshToken: true,
-    persistSession: true,
+    storage: isServer ? undefined : AsyncStorage,
+    autoRefreshToken: !isServer,
+    persistSession: !isServer,
     detectSessionInUrl: false,
     flowType: 'pkce',
   },
