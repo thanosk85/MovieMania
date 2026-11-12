@@ -1,4 +1,3 @@
-import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Linking from 'expo-linking';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
@@ -15,14 +14,12 @@ const isAuthPopup = WebBrowser.maybeCompleteAuthSession().type === 'success';
 
 const FAILED = 'Η σύνδεση με Google απέτυχε. Δοκίμασε ξανά.';
 
-// Το Expo Go δεν χειρίζεται το custom scheme της εφαρμογής, μόνο exp://
-// Τα development/production builds χρησιμοποιούν το scheme της εφαρμογής (myapp://login).
-function getRedirectUrl() {
-  const host = Constants.expoConfig?.hostUri;
-  if (Constants.executionEnvironment === ExecutionEnvironment.StoreClient && host) {
-    return `exp://${host}/--/login`;
-  }
-  return Linking.createURL('login');
+// Στο Expo Go η εφαρμογή ανοίγει με exp:// (ή exps://) και μπορεί να λάβει μόνο τέτοια links· το
+// Constants.executionEnvironment δεν είναι αξιόπιστο εκεί (στο SDK 58 επιστρέφει "bare").
+// Τα development/production builds χρησιμοποιούν το scheme της εφαρμογής (myapp://login) και το web το http(s) URL.
+async function getRedirectUrl() {
+  const expoGoBase = (await Linking.getInitialURL())?.match(/^exps?:\/\/[^/?#]+/)?.[0];
+  return expoGoBase ? `${expoGoBase}/--/login` : Linking.createURL('login');
 }
 
 type AuthResult = { code?: string; error?: string; flowId?: string };
@@ -62,16 +59,11 @@ export default function LoginScreen() {
   const theme = useTheme();
   const params = useLocalSearchParams<{ code?: string; error?: string; error_description?: string; sb_flow_id?: string }>();
   const { session } = useSession();
-  const linkingUrl = Linking.useLinkingURL();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
-  // Το deep link μπορεί να φτάσει ως παράμετροι της διαδρομής ή μόνο ως linking URL.
-  const fromUrl = parseAuthUrl(linkingUrl);
-  const code = params.code ?? fromUrl.code;
-  const flowId = params.sb_flow_id ?? fromUrl.flowId;
-  const oauthError = isAuthPopup ? undefined : (params.error_description ?? params.error ?? fromUrl.error);
+  const oauthError = isAuthPopup ? undefined : (params.error_description ?? params.error);
   const visibleMessage = message ?? (oauthError && oauthError !== dismissedError ? `${FAILED}\n(${oauthError})` : null);
 
   useEffect(() => {
@@ -82,11 +74,30 @@ export default function LoginScreen() {
     if (session) router.replace('/(tabs)');
   }, [session]);
 
+  // Ο κωδικός μπορεί να φτάσει ως παράμετροι της διαδρομής ή μόνο ως URL event (π.χ. στο Expo Go,
+  // όπου το Linking.useLinkingURL δεν ενημερώνεται).
   useEffect(() => {
-    exchangeCode(code, flowId).then((error) => {
+    exchangeCode(params.code, params.sb_flow_id).then((error) => {
       if (error) setMessage(error);
     });
-  }, [code, flowId]);
+  }, [params.code, params.sb_flow_id]);
+
+  useEffect(() => {
+    if (isAuthPopup) return;
+    const handle = (url: string | null) => {
+      const { code, error, flowId } = parseAuthUrl(url);
+      if (error) {
+        setMessage(`${FAILED}\n(${error})`);
+        return;
+      }
+      exchangeCode(code, flowId).then((failure) => {
+        if (failure) setMessage(failure);
+      });
+    };
+    Linking.getInitialURL().then(handle);
+    const subscription = Linking.addEventListener('url', (event) => handle(event.url));
+    return () => subscription.remove();
+  }, []);
 
   async function signInWithGoogle() {
     if (busy) return;
@@ -94,7 +105,7 @@ export default function LoginScreen() {
     setMessage(null);
     setDismissedError(oauthError ?? null);
     try {
-      const redirectTo = getRedirectUrl();
+      const redirectTo = await getRedirectUrl();
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: { redirectTo, skipBrowserRedirect: true },
@@ -102,7 +113,6 @@ export default function LoginScreen() {
       if (error || !data.url) throw error ?? new Error('Missing OAuth url');
 
       const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-      console.log('[auth] redirectTo:', redirectTo, 'result:', result.type);
       // Στο Android το αποτέλεσμα είναι συχνά "dismiss" και ο κωδικός φτάνει μέσω του deep link.
       if (result.type === 'success') {
         const returned = parseAuthUrl(result.url);
