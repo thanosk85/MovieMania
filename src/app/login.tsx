@@ -2,7 +2,7 @@ import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Linking from 'expo-linking';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AccessibilityInfo, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { LogoMark, Wordmark } from '@/components/logo';
@@ -10,7 +10,10 @@ import { useSession } from '@/hooks/use-session';
 import { useTheme } from '@/hooks/use-theme';
 import { supabase } from '@/lib/supabase';
 
-WebBrowser.maybeCompleteAuthSession();
+// Στο web το popup του OAuth στέλνει το URL στο κύριο παράθυρο και κλείνει· δεν ανταλλάσσει το ίδιο τον κωδικό.
+const isAuthPopup = WebBrowser.maybeCompleteAuthSession().type === 'success';
+
+const FAILED = 'Η σύνδεση με Google απέτυχε. Δοκίμασε ξανά.';
 
 // Το Expo Go δεν χειρίζεται το custom scheme της εφαρμογής, μόνο exp://
 // Τα development/production builds χρησιμοποιούν το scheme της εφαρμογής (myapp://login).
@@ -22,51 +25,74 @@ function getRedirectUrl() {
   return Linking.createURL('login');
 }
 
+type AuthResult = { code?: string; error?: string; flowId?: string };
+
+// Το Supabase επιστρέφει ?code=...&sb_flow_id=... σε επιτυχία ή error/error_description (query ή fragment) σε αποτυχία.
+function parseAuthUrl(url: string | null | undefined): AuthResult {
+  if (!url) return {};
+  const [beforeHash, hash = ''] = url.split('#');
+  const queryStart = beforeHash.indexOf('?');
+  const params = new URLSearchParams(`${queryStart === -1 ? '' : beforeHash.slice(queryStart + 1)}&${hash}`);
+  return {
+    code: params.get('code') ?? undefined,
+    error: params.get('error_description') ?? params.get('error') ?? undefined,
+    flowId: params.get('sb_flow_id') ?? undefined,
+  };
+}
+
+// Στο Android ο κωδικός φτάνει και από το auth session και από το deep link (που μπορεί να ανοίξει
+// δεύτερη οθόνη login). Κρατιέται σε επίπεδο module ώστε να ανταλλαχθεί μόνο μία φορά.
+let handledCode: string | null = null;
+
+// Επιστρέφει μήνυμα σφάλματος ή null.
+async function exchangeCode(code: string | undefined, flowId: string | undefined): Promise<string | null> {
+  if (isAuthPopup || !code || handledCode === code) return null;
+  handledCode = code;
+  try {
+    const { error } = await supabase.auth.exchangeCodeForSession(code, flowId ? { flowId } : undefined);
+    if (error) throw error;
+    return null;
+  } catch (e) {
+    console.warn('[auth] exchange failed:', e);
+    return `${FAILED}\n(${e instanceof Error ? e.message : String(e)})`;
+  }
+}
+
 export default function LoginScreen() {
   const theme = useTheme();
-  const { code } = useLocalSearchParams<{ code?: string }>();
+  const params = useLocalSearchParams<{ code?: string; error?: string; error_description?: string; sb_flow_id?: string }>();
   const { session } = useSession();
-  const rawUrl = Linking.useLinkingURL();
-  useEffect(() => {
-    console.warn('[auth-debug] url:', rawUrl?.replace(/code=[^&#]+/, 'code=<redacted>'), 'codeParam:', typeof code, 'session:', Boolean(session));
-  }, [rawUrl, code, session]);
-  const handledCode = useRef<string | null>(null);
+  const linkingUrl = Linking.useLinkingURL();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
 
-  const show = useCallback((text: string) => {
-    setMessage(text);
-    AccessibilityInfo.announceForAccessibility(text);
-  }, []);
+  // Το deep link μπορεί να φτάσει ως παράμετροι της διαδρομής ή μόνο ως linking URL.
+  const fromUrl = parseAuthUrl(linkingUrl);
+  const code = params.code ?? fromUrl.code;
+  const flowId = params.sb_flow_id ?? fromUrl.flowId;
+  const oauthError = isAuthPopup ? undefined : (params.error_description ?? params.error ?? fromUrl.error);
+  const visibleMessage = message ?? (oauthError && oauthError !== dismissedError ? `${FAILED}\n(${oauthError})` : null);
 
-  const exchange = useCallback(async (authCode: string): Promise<boolean> => {
-    if (handledCode.current === authCode) return true;
-    handledCode.current = authCode;
-    const { error } = await supabase.auth.exchangeCodeForSession(authCode);
-    console.warn('[auth-debug] exchange error:', error?.message ?? 'none');
-    if (error) {
-      console.warn(error);
-      return false;
-    }
-    return true;
-  }, []);
+  useEffect(() => {
+    if (visibleMessage) AccessibilityInfo.announceForAccessibility(visibleMessage);
+  }, [visibleMessage]);
 
   useEffect(() => {
     if (session) router.replace('/(tabs)');
   }, [session]);
 
   useEffect(() => {
-    if (typeof code === 'string') {
-      exchange(code).then((ok) => {
-        if (!ok) show('Η σύνδεση με Google απέτυχε. Δοκίμασε ξανά.');
-      });
-    }
-  }, [code, exchange, show]);
+    exchangeCode(code, flowId).then((error) => {
+      if (error) setMessage(error);
+    });
+  }, [code, flowId]);
 
   async function signInWithGoogle() {
     if (busy) return;
     setBusy(true);
     setMessage(null);
+    setDismissedError(oauthError ?? null);
     try {
       const redirectTo = getRedirectUrl();
       const { data, error } = await supabase.auth.signInWithOAuth({
@@ -76,16 +102,16 @@ export default function LoginScreen() {
       if (error || !data.url) throw error ?? new Error('Missing OAuth url');
 
       const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-      console.warn('[auth-debug] redirectTo:', redirectTo, 'result:', result.type, 'url' in result ? result.url.replace(/code=[^&#]+/, 'code=<redacted>') : '');
+      console.log('[auth] redirectTo:', redirectTo, 'result:', result.type);
+      // Στο Android το αποτέλεσμα είναι συχνά "dismiss" και ο κωδικός φτάνει μέσω του deep link.
       if (result.type === 'success') {
-        const returned = Linking.parse(result.url).queryParams?.code;
-        if (typeof returned === 'string' && !(await exchange(returned))) {
-          show('Η σύνδεση με Google απέτυχε. Δοκίμασε ξανά.');
-        }
+        const returned = parseAuthUrl(result.url);
+        const failure = returned.error ? `${FAILED}\n(${returned.error})` : await exchangeCode(returned.code, returned.flowId);
+        if (failure) setMessage(failure);
       }
     } catch (e) {
-      console.warn(e);
-      show('Η σύνδεση με Google απέτυχε. Δοκίμασε ξανά.');
+      console.warn('[auth] sign-in failed:', e);
+      setMessage(FAILED);
     } finally {
       setBusy(false);
     }
@@ -102,9 +128,9 @@ export default function LoginScreen() {
         Συνδέσου με τον λογαριασμό σου Google για να βαθμολογήσεις ταινίες.
       </Text>
 
-      {message ? (
-        <Text accessibilityRole="alert" style={{ color: theme.text }}>
-          {message}
+      {visibleMessage ? (
+        <Text accessibilityRole="alert" style={{ color: theme.text, textAlign: 'center' }}>
+          {visibleMessage}
         </Text>
       ) : null}
 
