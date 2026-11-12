@@ -21,31 +21,42 @@ export function SplashOverlay({ ready }: { ready: boolean }) {
 
   useEffect(() => {
     if (ready && minElapsed) {
-      Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true }).start(() => setGone(true));
+      Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: process.env.EXPO_OS !== 'web' }).start(() => setGone(true));
     }
   }, [ready, minElapsed, opacity]);
 
+  useEffect(() => {
+    if (process.env.EXPO_OS === 'web') SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   if (gone) return null;
+
+  const content = (
+    <Animated.View
+      accessibilityRole="progressbar"
+      accessibilityLabel="Φόρτωση MovieMania"
+      accessible
+      style={[styles.root, { opacity }]}>
+      <View style={styles.center}>
+        <LogoMark size={96} inverted />
+        <Wordmark size={40} inverted />
+        <Text style={styles.tagline}>Βαθμολόγησε ό,τι βλέπεις</Text>
+      </View>
+    </Animated.View>
+  );
+
+  // Στο web το Modal αποδίδεται μέσω portal που δεν υπάρχει στο server rendering (hydration mismatch).
+  if (process.env.EXPO_OS === 'web') return content;
 
   return (
     <Modal transparent visible statusBarTranslucent navigationBarTranslucent animationType="none" onShow={() => SplashScreen.hideAsync().catch(() => {})}>
-      <Animated.View
-        accessibilityRole="progressbar"
-        accessibilityLabel="Φόρτωση MovieMania"
-        accessible
-        style={[styles.root, { opacity }]}>
-        <View style={styles.center}>
-          <LogoMark size={96} inverted />
-          <Wordmark size={40} inverted />
-          <Text style={styles.tagline}>Βαθμολόγησε ό,τι βλέπεις</Text>
-        </View>
-      </Animated.View>
+      {content}
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { ...StyleSheet.absoluteFill, backgroundColor: '#1A1A1A', alignItems: 'center', justifyContent: 'center' },
+  root: { ...StyleSheet.absoluteFill, zIndex: 1000, backgroundColor: '#1A1A1A', alignItems: 'center', justifyContent: 'center' },
   center: { alignItems: 'center', gap: 20 },
   tagline: { color: '#C9C3B8', fontSize: 15 },
 });
