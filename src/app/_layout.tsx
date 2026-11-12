@@ -1,18 +1,33 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { AppHeader } from '@/components/logo';
+import { SplashOverlay } from '@/components/splash-overlay';
+import { Colors } from '@/constants/theme';
+import { useSession } from '@/hooks/use-session';
 
-SplashScreen.preventAutoHideAsync();
+const c = Colors.light;
+const navTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    primary: c.text,
+    background: c.background,
+    card: c.background,
+    text: c.text,
+    border: c.backgroundElement,
+  },
+};
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+export default function RootLayout() {
+  const { ready } = useSession();
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
+    <ThemeProvider value={navTheme}>
+      <Stack screenOptions={{ header: () => <AppHeader back /> }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="movie/[id]" />
+        <Stack.Screen name="login" options={{ presentation: 'modal' }} />
+      </Stack>
+      <SplashOverlay ready={ready} />
     </ThemeProvider>
   );
 }
